@@ -27,6 +27,12 @@ jobs:
           echo "Project dir: $D"
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
 
+      # مرآة Google قبل Maven Central لتفادي خطأ 429
+      - name: Add Maven mirror
+        run: |
+          sed -i "s#mavenCentral()#maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }\n        mavenCentral()#g" "$PROJECT_DIR/settings.gradle"
+          cat "$PROJECT_DIR/settings.gradle"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -41,9 +47,15 @@ jobs:
         with:
           gradle-version: 8.5
 
-      - name: Build APK
+      - name: Build APK (with retry)
         working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          for i in 1 2 3; do
+            echo "=== Attempt $i ==="
+            if gradle assembleDebug --no-daemon --stacktrace; then exit 0; fi
+            sleep 30
+          done
+          exit 1
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
