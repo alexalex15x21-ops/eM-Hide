@@ -1,0 +1,53 @@
+name: Build eM Hide APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # بيدور على أي ملف zip في الريبو ويفكه جوه السيرفر (مش لازم تفكه بنفسك)
+      - name: Unzip project
+        run: |
+          set -e
+          ZIP=$(find . -maxdepth 1 -iname '*.zip' | head -n1)
+          if [ -n "$ZIP" ]; then
+            echo "Found: $ZIP"
+            rm -rf _src && mkdir _src
+            unzip -q "$ZIP" -d _src
+            D=$(find _src -name settings.gradle -not -path '*/__MACOSX/*' -printf '%h\n' | head -n1)
+          else
+            D=$(find . -maxdepth 2 -name settings.gradle -printf '%h\n' | head -n1)
+          fi
+          if [ -z "$D" ]; then echo "settings.gradle not found"; exit 1; fi
+          echo "Project dir: $D"
+          echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.5
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: eM-Hide-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
