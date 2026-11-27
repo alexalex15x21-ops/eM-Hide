@@ -4,6 +4,10 @@ on:
   push:
   workflow_dispatch:
 
+env:
+  # بصمة شهادة التوقيع (SHA-256) — لو اتغيّرت الـ build هيفشل بدل ما يطلّع APK مش هيتثبت فوق القديم
+  EXPECTED_SHA256: "FB:3C:11:2F:74:15:4C:D7:BF:28:6A:74:51:00:7A:2F:9C:C6:88:7F:53:33:2F:5A:FD:21:19:40:BE:28:1D:83"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,6 +28,7 @@ jobs:
             D=$(find . -maxdepth 2 -name settings.gradle -printf '%h\n' | head -n1)
           fi
           if [ -z "$D" ]; then echo "settings.gradle not found"; exit 1; fi
+          if [ ! -f "$D/app/emhide.jks" ]; then echo "app/emhide.jks (مفتاح التوقيع) مش موجود في الـ zip"; exit 1; fi
           echo "Project dir: $D"
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
 
@@ -31,13 +36,21 @@ jobs:
       - name: Add Maven mirror
         run: |
           sed -i "s#mavenCentral()#maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }\n        mavenCentral()#g" "$PROJECT_DIR/settings.gradle"
-          cat "$PROJECT_DIR/settings.gradle"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Check signing key fingerprint
+        run: |
+          FP=$(keytool -list -v -keystore "$PROJECT_DIR/app/emhide.jks" -storepass emhide2026 -alias emhide 2>/dev/null | grep 'SHA256:' | head -n1 | awk '{print $2}')
+          echo "Keystore SHA-256: $FP"
+          if [ "$FP" != "$EXPECTED_SHA256" ]; then
+            echo "::error::مفتاح التوقيع اتغيّر! التحديث مش هيتثبت فوق النسخة القديمة"
+            exit 1
+          fi
 
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
@@ -47,18 +60,37 @@ jobs:
         with:
           gradle-version: 8.5
 
-      - name: Build APK (with retry)
+      # versionCode بيزيد تلقائيًا مع كل build => التحديث يتثبت فوق القديم
+      - name: Build signed APK (with retry)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          VC=$(( ${{ github.run_number }} * 100 + ${{ github.run_attempt }} ))
+          echo "versionCode = $VC"
           for i in 1 2 3; do
             echo "=== Attempt $i ==="
-            if gradle assembleDebug --no-daemon --stacktrace; then exit 0; fi
+            if gradle assembleRelease --no-daemon --stacktrace -PverCode=$VC; then exit 0; fi
             sleep 30
           done
           exit 1
+
+      # تحقق نهائي من الـ APK نفسه: التوقيع سليم + بصمة الشهادة + رقم النسخة
+      - name: Verify APK signature
+        run: |
+          APK=$(ls "$PROJECT_DIR"/app/build/outputs/apk/release/*.apk | head -n1)
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          echo "APK: $APK  (build-tools $BT)"
+          "$ANDROID_HOME/build-tools/$BT/apksigner" verify --verbose --print-certs "$APK" | tee sig.txt
+          grep -q "Verifies" sig.txt
+          APK_FP=$(grep -m1 "certificate SHA-256 digest" sig.txt | awk '{print $NF}' | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')
+          echo "APK cert SHA-256: $APK_FP"
+          if [ "$APK_FP" != "$EXPECTED_SHA256" ]; then
+            echo "::error::توقيع الـ APK مختلف عن المفتاح المتوقع"
+            exit 1
+          fi
+          "$ANDROID_HOME/build-tools/$BT/aapt2" dump badging "$APK" | grep -E "^package:" 
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: eM-Hide-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
